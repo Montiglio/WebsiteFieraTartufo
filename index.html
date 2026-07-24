@@ -584,7 +584,12 @@
     const menuButton = document.querySelector(".menu-button");
     const nav = document.querySelector("#navigazione-principale");
     const main = document.querySelector("#contenuto");
+    const synth = window.speechSynthesis;
+    const SpeechUtteranceCtor = window.SpeechSynthesisUtterance || window.webkitSpeechSynthesisUtterance;
     let availableVoices = [];
+    let isReading = false;
+    let queue = [];
+    let queueIndex = 0;
 
     if (menuButton && nav) {
       menuButton.addEventListener("click", () => {
@@ -594,84 +599,164 @@
       });
     }
 
-    if (!readButton || !main || !("speechSynthesis" in window)) {
+    if (!readButton || !main || !synth || !SpeechUtteranceCtor) {
       if (readButton) {
         readButton.hidden = true;
       }
       return;
     }
 
-    const setReadingState = (isReading) => {
-      readButton.setAttribute("aria-pressed", String(isReading));
+    const setReadingState = (reading) => {
+      isReading = reading;
+      readButton.setAttribute("aria-pressed", String(reading));
       readButton.setAttribute(
         "aria-label",
-        isReading ? "Interrompi lettura ad alta voce della pagina" : "Attiva lettura ad alta voce della pagina"
+        reading ? "Interrompi lettura ad alta voce della pagina" : "Attiva lettura ad alta voce della pagina"
       );
-      readButton.querySelector("span").textContent = isReading ? "Stop" : "Ascolta";
+      const label = readButton.querySelector("span");
+      if (label) {
+        label.textContent = reading ? "Stop" : "Ascolta";
+      }
     };
 
     const getPageText = () => {
       return [document.title, main.innerText].join(". ").replace(/\s+/g, " ").trim();
     };
 
+    const splitTextIntoChunks = (text, maxLength = 220) => {
+      const words = text.split(/\s+/).filter(Boolean);
+      const chunks = [];
+      let current = "";
+
+      words.forEach((word) => {
+        const candidate = current ? `${current} ${word}` : word;
+        if (candidate.length <= maxLength) {
+          current = candidate;
+        } else {
+          if (current) {
+            chunks.push(current.trim());
+          }
+          current = word;
+        }
+      });
+
+      if (current) {
+        chunks.push(current.trim());
+      }
+
+      return chunks.filter(Boolean);
+    };
+
+    const stopReading = () => {
+      if (synth.speaking || synth.pending || synth.paused) {
+        synth.cancel();
+      }
+      queue = [];
+      queueIndex = 0;
+      setReadingState(false);
+    };
+
+    const speakNextChunk = () => {
+      if (queueIndex >= queue.length) {
+        stopReading();
+        return;
+      }
+
+      const chunk = queue[queueIndex];
+      queueIndex += 1;
+      const utterance = new SpeechUtteranceCtor(chunk);
+      utterance.lang = "it-IT";
+      utterance.rate = 0.95;
+      utterance.pitch = 1;
+      utterance.volume = 1;
+      utterance.onend = () => {
+        speakNextChunk();
+      };
+      utterance.onerror = () => {
+        speakNextChunk();
+      };
+      if (synth.paused) {
+        synth.resume();
+      }
+      synth.cancel();
+      synth.speak(utterance);
+    };
+
     const populateVoicePicker = () => {
-      availableVoices = speechSynthesis.getVoices();
-      if (!voicePicker || !voicePickerWrap || availableVoices.length === 0) {
+      availableVoices = synth.getVoices ? synth.getVoices() : [];
+      if (!voicePicker || !voicePickerWrap) {
+        return;
+      }
+
+      if (availableVoices.length === 0) {
+        voicePickerWrap.hidden = true;
         return;
       }
 
       const currentVoice = voicePicker.value;
       const sortedVoices = [...availableVoices].sort((a, b) => {
-        const aItalian = a.lang.toLowerCase().startsWith("it") ? 0 : 1;
-        const bItalian = b.lang.toLowerCase().startsWith("it") ? 0 : 1;
-        return aItalian - bItalian || a.name.localeCompare(b.name, "it");
+        const aItalian = a.lang && a.lang.toLowerCase().startsWith("it") ? 0 : 1;
+        const bItalian = b.lang && b.lang.toLowerCase().startsWith("it") ? 0 : 1;
+        return aItalian - bItalian || (a.name || "").localeCompare(b.name || "", "it");
       });
 
       voicePicker.innerHTML = "";
       sortedVoices.forEach((voice, index) => {
         const option = document.createElement("option");
-        option.value = voice.voiceURI;
-        option.textContent = voice.lang.toLowerCase().startsWith("it")
+        const voiceKey = voice.voiceURI || voice.name;
+        option.value = voiceKey;
+        option.textContent = voice.lang && voice.lang.toLowerCase().startsWith("it")
           ? `IT ${index + 1}`
-          : voice.lang;
+          : voice.lang || voice.name;
         option.title = `${voice.name} (${voice.lang})`;
         voicePicker.appendChild(option);
       });
 
       const preferredVoice = sortedVoices.find((voice) => voice.lang === "it-IT")
-        || sortedVoices.find((voice) => voice.lang.toLowerCase().startsWith("it"))
+        || sortedVoices.find((voice) => voice.lang && voice.lang.toLowerCase().startsWith("it"))
         || sortedVoices[0];
-      voicePicker.value = sortedVoices.some((voice) => voice.voiceURI === currentVoice)
-        ? currentVoice
-        : preferredVoice.voiceURI;
+      const preferredVoiceKey = preferredVoice ? preferredVoice.voiceURI || preferredVoice.name : "";
+      const hasCurrentVoice = sortedVoices.some((voice) => (voice.voiceURI || voice.name) === currentVoice);
+      voicePicker.value = hasCurrentVoice ? currentVoice : preferredVoiceKey;
       voicePickerWrap.hidden = false;
     };
 
-    populateVoicePicker();
-    speechSynthesis.addEventListener("voiceschanged", populateVoicePicker);
-
-    readButton.addEventListener("click", () => {
-      if (speechSynthesis.speaking) {
-        speechSynthesis.cancel();
-        setReadingState(false);
+    const startReading = () => {
+      const text = getPageText();
+      if (!text) {
         return;
       }
 
-      const utterance = new SpeechSynthesisUtterance(getPageText());
-      const selectedVoice = availableVoices.find((voice) => voice.voiceURI === voicePicker?.value);
-      utterance.lang = "it-IT";
-      if (selectedVoice) {
-        utterance.voice = selectedVoice;
-        utterance.lang = selectedVoice.lang;
+      stopReading();
+      queue = splitTextIntoChunks(text);
+      queueIndex = 0;
+      if (queue.length === 0) {
+        return;
       }
-      utterance.rate = 0.92;
-      utterance.onend = () => setReadingState(false);
-      utterance.onerror = () => setReadingState(false);
+
       setReadingState(true);
-      speechSynthesis.speak(utterance);
+      speakNextChunk();
+    };
+
+    populateVoicePicker();
+    if (synth.addEventListener) {
+      synth.addEventListener("voiceschanged", populateVoicePicker);
+    } else if (synth.onvoiceschanged !== undefined) {
+      synth.onvoiceschanged = populateVoicePicker;
+    }
+
+    readButton.addEventListener("click", () => {
+      if (isReading || synth.speaking || synth.pending || synth.paused) {
+        stopReading();
+        return;
+      }
+
+      startReading();
     });
 
-    window.addEventListener("beforeunload", () => speechSynthesis.cancel());
+    window.addEventListener("beforeunload", () => {
+      stopReading();
+    });
   })();
 </script>
 </body>
