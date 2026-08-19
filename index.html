@@ -592,10 +592,19 @@
     let queueIndex = 0;
 
     if (menuButton && nav) {
+      const closeMenu = () => {
+        menuButton.setAttribute("aria-expanded", "false");
+        nav.classList.remove("is-open");
+      };
+
       menuButton.addEventListener("click", () => {
         const isOpen = menuButton.getAttribute("aria-expanded") === "true";
         menuButton.setAttribute("aria-expanded", String(!isOpen));
         nav.classList.toggle("is-open", !isOpen);
+      });
+
+      nav.querySelectorAll("a").forEach((link) => {
+        link.addEventListener("click", closeMenu);
       });
     }
 
